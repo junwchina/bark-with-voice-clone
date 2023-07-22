@@ -1,5 +1,3 @@
-# From https://github.com/gitmylo/bark-voice-cloning-HuBERT-quantizer
-
 import os.path
 import shutil
 import urllib.request

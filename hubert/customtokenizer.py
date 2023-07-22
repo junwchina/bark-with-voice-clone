@@ -6,12 +6,15 @@ License: MIT
 
 import json
 import os.path
+from typing import Optional
 from zipfile import ZipFile
 
 import numpy
 import torch
 from torch import nn, optim
 from torch.serialization import MAP_LOCATION
+
+from bark.generation import _grab_best_device
 
 
 class CustomTokenizer(nn.Module):
@@ -26,6 +29,7 @@ class CustomTokenizer(nn.Module):
             self.intermediate = nn.Linear(hidden_size, 4096)
             next_size = 4096
 
+        self.device = _grab_best_device()
         self.fc = nn.Linear(next_size, output_size)
         self.softmax = nn.LogSoftmax(dim=1)
         self.optimizer: optim.Optimizer = None
@@ -53,7 +57,7 @@ class CustomTokenizer(nn.Module):
         return torch.argmax(self(x), dim=1)
 
     def prepare_training(self):
-        self.optimizer = optim.Adam(self.parameters(), 0.001)
+        self.optimizer = optim.Adam(self.parameters(), 0.0005)
 
     def train_step(self, x_train, y_train, log_loss=False):
         # y_train = y_train[:-1]
@@ -79,7 +83,7 @@ class CustomTokenizer(nn.Module):
 
         y_train_hot = torch.zeros(len(y_train), self.output_size)
         y_train_hot[range(len(y_train)), y_train] = 1
-        y_train_hot = y_train_hot.to('cuda')
+        y_train_hot = y_train_hot.to(self.device)
 
         # Calculate the loss
         loss = lossfunc(y_pred, y_train_hot)
@@ -115,12 +119,12 @@ class CustomTokenizer(nn.Module):
         if old:
             model = CustomTokenizer()
         else:
-            model = CustomTokenizer(data_from_model.hidden_size, data_from_model.input_size, data_from_model.output_size, data_from_model.version)
-        model.load_state_dict(torch.load(path))
+            model = CustomTokenizer(data_from_model.hidden_size, data_from_model.input_size,
+                                    data_from_model.output_size, data_from_model.version)
+        model.load_state_dict(torch.load(path, map_location=map_location))
         if map_location:
             model = model.to(map_location)
         return model
-
 
 
 class Data:
@@ -150,37 +154,47 @@ class Data:
         return json.dumps(data)
 
 
-def auto_train(data_path, save_path='model.pth', load_model: str | None = None, save_epochs=1):
-    data_x, data_y = [], []
+def auto_train(save_path, ready_path, load_model: Optional[str] = None, save_epochs=1):
+    data_x, data_y = {}, {}
 
+    device = _grab_best_device()
     if load_model and os.path.isfile(load_model):
         print('Loading model from', load_model)
-        model_training = CustomTokenizer.load_from_checkpoint(load_model, 'cuda')
+        model_training = CustomTokenizer.load_from_checkpoint(load_model, device)
     else:
         print('Creating new model.')
-        model_training = CustomTokenizer(version=1).to('cuda')  # Settings for the model to run without lstm
-    save_path = os.path.join(data_path, save_path)
+        model_training = CustomTokenizer(version=1).to(device)
     base_save_path = '.'.join(save_path.split('.')[:-1])
 
     sem_string = '_semantic.npy'
     feat_string = '_semantic_features.npy'
 
-    ready = os.path.join(data_path, 'ready')
-    for input_file in os.listdir(ready):
-        full_path = os.path.join(ready, input_file)
+    for input_file in os.listdir(ready_path):
+        full_path = os.path.join(ready_path, input_file)
+        try:
+            prefix = input_file.split("_")[0]
+            number = int(prefix)
+        except ValueError as e:
+            raise e
         if input_file.endswith(sem_string):
-            data_y.append(numpy.load(full_path))
+            data_y[number] = numpy.load(full_path)
         elif input_file.endswith(feat_string):
-            data_x.append(numpy.load(full_path))
-    model_training.prepare_training()
+            data_x[number] = numpy.load(full_path)
 
+    model_training.prepare_training()
     epoch = 1
 
     while 1:
         for i in range(save_epochs):
             j = 0
-            for x, y in zip(data_x, data_y):
-                model_training.train_step(torch.tensor(x).to('cuda'), torch.tensor(y).to('cuda'), j % 50 == 0)  # Print loss every 50 steps
+            for i in range(max(len(data_x), len(data_y))):
+                x = data_x.get(i)
+                y = data_y.get(i)
+                if x is None or y is None:
+                    print(f'The training data does not match. key={i}')
+                    continue
+                model_training.train_step(torch.tensor(x).to(device), torch.tensor(y).to(device),
+                                          j % 50 == 0)  # Print loss every 50 steps
                 j += 1
         save_p = save_path
         save_p_2 = f'{base_save_path}_epoch_{epoch}.pth'

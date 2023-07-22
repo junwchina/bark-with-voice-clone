@@ -1,9 +1,7 @@
 import contextlib
 import gc
-import hashlib
 import os
 import re
-import json
 
 from encodec import EncodecModel
 import funcy
@@ -61,44 +59,42 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 
 
 default_cache_dir = os.path.join(os.path.expanduser("~"), ".cache")
-CACHE_DIR = os.path.join(os.getenv("XDG_CACHE_HOME", default_cache_dir), "serp", "bark_v0")
+CACHE_DIR = os.path.join(os.getenv("XDG_CACHE_HOME", default_cache_dir), "suno", "bark_v0")
 
 
-USE_SMALL_MODELS = os.environ.get("SERP_USE_SMALL_MODELS", False)
-GLOBAL_ENABLE_MPS = os.environ.get("SERP_ENABLE_MPS", False)
-OFFLOAD_CPU = os.environ.get("SERP_OFFLOAD_CPU", False)
+def _cast_bool_env_var(s):
+    return s.lower() in ('true', '1', 't')
+
+
+USE_SMALL_MODELS = _cast_bool_env_var(os.environ.get("SUNO_USE_SMALL_MODELS", "False"))
+GLOBAL_ENABLE_MPS = _cast_bool_env_var(os.environ.get("SUNO_ENABLE_MPS", "False"))
+OFFLOAD_CPU = _cast_bool_env_var(os.environ.get("SUNO_OFFLOAD_CPU", "False"))
 
 
 REMOTE_MODEL_PATHS = {
     "text_small": {
         "repo_id": "suno/bark",
         "file_name": "text.pt",
-        "checksum": "b3e42bcbab23b688355cd44128c4cdd3",
     },
     "coarse_small": {
         "repo_id": "suno/bark",
         "file_name": "coarse.pt",
-        "checksum": "5fe964825e3b0321f9d5f3857b89194d",
     },
     "fine_small": {
         "repo_id": "suno/bark",
         "file_name": "fine.pt",
-        "checksum": "5428d1befe05be2ba32195496e58dc90",
     },
     "text": {
         "repo_id": "suno/bark",
         "file_name": "text_2.pt",
-        "checksum": "54afa89d65e318d4f5f80e8e8799026a",
     },
     "coarse": {
         "repo_id": "suno/bark",
         "file_name": "coarse_2.pt",
-        "checksum": "8a98094e5e3a255a5c9c0ab7efe8fd28",
     },
     "fine": {
         "repo_id": "suno/bark",
         "file_name": "fine_2.pt",
-        "checksum": "59d184ed44e3650774a2f0503a48a97b",
     },
 }
 
@@ -108,28 +104,6 @@ if not hasattr(torch.nn.functional, 'scaled_dot_product_attention') and torch.cu
         "torch version does not support flash attention. You will get faster" +
         " inference speed by upgrade torch to newest nightly version."
     )
-
-
-def _string_md5(s):
-    m = hashlib.md5()
-    m.update(s.encode("utf-8"))
-    return m.hexdigest()
-
-
-def _md5(fname):
-    hash_md5 = hashlib.md5()
-    with open(fname, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
-
-
-def _get_ckpt_path(model_type, use_small=False, path=None):
-    model_key = f"{model_type}_small" if use_small or USE_SMALL_MODELS else model_type
-    model_name = REMOTE_MODEL_PATHS[model_key]["file_name"]
-    if path is None:
-        path = CACHE_DIR
-    return os.path.join(path, f"{model_name}")
 
 
 def _grab_best_device(use_gpu=True):
@@ -142,12 +116,17 @@ def _grab_best_device(use_gpu=True):
     return device
 
 
-def _download(from_hf_path, file_name, to_local_path):
-    to_local_path = to_local_path.replace("\\", "/")
-    path = '/'.join(to_local_path.split("/")[:-1])
-    os.makedirs(path, exist_ok=True)
-    hf_hub_download(repo_id=from_hf_path, filename=file_name, local_dir=path)
-    os.replace(os.path.join(path, file_name), to_local_path)
+def _get_ckpt_path(model_type, use_small=False):
+    key = model_type
+    if use_small or USE_SMALL_MODELS:
+        key += "_small"
+    return os.path.join(CACHE_DIR, REMOTE_MODEL_PATHS[key]["file_name"])
+
+
+def _download(from_hf_path, file_name):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    hf_hub_download(repo_id=from_hf_path, filename=file_name, local_dir=CACHE_DIR)
+
 
 class InferenceContext:
     def __init__(self, benchmark=False):
@@ -182,7 +161,7 @@ def _clear_cuda_cache():
 
 def clean_models(model_key=None):
     global models
-    model_keys = [model_key] if model_key is not None else models.keys()
+    model_keys = [model_key] if model_key is not None else list(models.keys())
     for k in model_keys:
         if k in models:
             del models[k]
@@ -204,81 +183,36 @@ def _load_model(ckpt_path, device, use_small=False, model_type="text"):
         raise NotImplementedError()
     model_key = f"{model_type}_small" if use_small or USE_SMALL_MODELS else model_type
     model_info = REMOTE_MODEL_PATHS[model_key]
-    # if (
-    #     os.path.exists(ckpt_path) and
-    #     _md5(ckpt_path) != model_info["checksum"]
-    # ):
-    #     logger.warning(f"found outdated {model_type} model, removing.")
-    #     os.remove(ckpt_path)
     if not os.path.exists(ckpt_path):
         logger.info(f"{model_type} model not found, downloading into `{CACHE_DIR}`.")
-        _download(model_info["repo_id"], model_info["file_name"], ckpt_path)
+        _download(model_info["repo_id"], model_info["file_name"])
     checkpoint = torch.load(ckpt_path, map_location=device)
     # this is a hack
-    # check if config.json is in the same directory as the checkpoint
-    # if so, load it
-    # otherwise, assume it's in the checkpoint
-    config_path = os.path.join(os.path.dirname(ckpt_path), "config.json")
-    if os.path.exists(config_path):
-        with open(config_path, "r") as f:
-            model_args = json.load(f)
-    else:
-        model_args = checkpoint["model_args"]
+    model_args = checkpoint["model_args"]
     if "input_vocab_size" not in model_args:
         model_args["input_vocab_size"] = model_args["vocab_size"]
         model_args["output_vocab_size"] = model_args["vocab_size"]
         del model_args["vocab_size"]
-    gptconf = ConfigClass(**model_args)
+    gptconf = ConfigClass(**checkpoint["model_args"])
     model = ModelClass(gptconf)
-    if checkpoint.get("model", None) is not None:
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
+    state_dict = checkpoint["model"]
     # fixup checkpoint
     unwanted_prefix = "_orig_mod."
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
-    unwanted_suffixes = [
-        "lora_right_weight",
-        "lora_left_weight",
-        "lora_right_bias",
-        "lora_left_bias",
-    ]
-    for k, v in list(state_dict.items()):
-        for suffix in unwanted_suffixes:
-            if k.endswith(suffix):
-                state_dict.pop(k)
-    # super hacky - should probably refactor this
-    if state_dict.get('lm_head.0.weight', None) is not None:
-        state_dict['lm_head.weight'] = state_dict.pop('lm_head.0.weight')
-    if state_dict.get('lm_heads.0.0.weight', None) is not None:
-        state_dict['lm_heads.0.weight'] = state_dict.pop('lm_heads.0.0.weight')
-    if state_dict.get('lm_heads.1.0.weight', None) is not None:
-        state_dict['lm_heads.1.weight'] = state_dict.pop('lm_heads.1.0.weight')
-    if state_dict.get('lm_heads.2.0.weight', None) is not None:
-        state_dict['lm_heads.2.weight'] = state_dict.pop('lm_heads.2.0.weight')
-    if state_dict.get('lm_heads.3.0.weight', None) is not None:
-        state_dict['lm_heads.3.weight'] = state_dict.pop('lm_heads.3.0.weight')
-    if state_dict.get('lm_heads.4.0.weight', None) is not None:
-        state_dict['lm_heads.4.weight'] = state_dict.pop('lm_heads.4.0.weight')
-    if state_dict.get('lm_heads.5.0.weight', None) is not None:
-        state_dict['lm_heads.5.weight'] = state_dict.pop('lm_heads.5.0.weight')
-    if state_dict.get('lm_heads.6.0.weight', None) is not None:
-        state_dict['lm_heads.6.weight'] = state_dict.pop('lm_heads.6.0.weight')
     extra_keys = set(state_dict.keys()) - set(model.state_dict().keys())
     extra_keys = set([k for k in extra_keys if not k.endswith(".attn.bias")])
     missing_keys = set(model.state_dict().keys()) - set(state_dict.keys())
     missing_keys = set([k for k in missing_keys if not k.endswith(".attn.bias")])
     if len(extra_keys) != 0:
-        print(f"extra keys found: {extra_keys}")
+        raise ValueError(f"extra keys found: {extra_keys}")
     if len(missing_keys) != 0:
         raise ValueError(f"missing keys: {missing_keys}")
     model.load_state_dict(state_dict, strict=False)
     n_params = model.get_num_params()
-    if checkpoint.get("best_val_loss", None) is not None:
-        val_loss = checkpoint["best_val_loss"].item()
-        logger.info(f"model loaded: {round(n_params/1e6,1)}M params, {round(val_loss,3)} loss")
+    val_loss = checkpoint["best_val_loss"].item()
+    logger.info(f"model loaded: {round(n_params/1e6,1)}M params, {round(val_loss,3)} loss")
     model.eval()
     model.to(device)
     del checkpoint, state_dict
@@ -301,7 +235,7 @@ def _load_codec_model(device):
     return model
 
 
-def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="text", path=None):
+def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="text"):
     _load_model_f = funcy.partial(_load_model, model_type=model_type, use_small=use_small)
     if model_type not in ("text", "coarse", "fine"):
         raise NotImplementedError()
@@ -313,11 +247,8 @@ def load_model(use_gpu=True, use_small=False, force_reload=False, model_type="te
         models_devices[model_key] = device
         device = "cpu"
     if model_key not in models or force_reload:
-        if path.endswith(".ckpt") or path.endswith(".pt") or path.endswith(".bin"):
-            ckpt_path = path
-        else:
-            ckpt_path = _get_ckpt_path(model_type, use_small=use_small, path=path)
-        # clean_models(model_key=model_key)
+        ckpt_path = _get_ckpt_path(model_type, use_small=use_small)
+        clean_models(model_key=model_key)
         model = _load_model_f(ckpt_path, device)
         models[model_key] = model
     if model_type == "text":
@@ -349,16 +280,12 @@ def load_codec_model(use_gpu=True, force_reload=False):
 def preload_models(
     text_use_gpu=True,
     text_use_small=False,
-    text_model_path=None,
     coarse_use_gpu=True,
     coarse_use_small=False,
-    coarse_model_path=None,
     fine_use_gpu=True,
     fine_use_small=False,
-    fine_model_path=None,
     codec_use_gpu=True,
     force_reload=False,
-    path=None,
 ):
     """Load all the necessary models for the pipeline."""
     if _grab_best_device() == "cpu" and (
@@ -366,17 +293,16 @@ def preload_models(
     ):
         logger.warning("No GPU being used. Careful, inference might be very slow!")
     _ = load_model(
-        model_type="text", use_gpu=text_use_gpu, use_small=text_use_small, force_reload=force_reload, path=path if text_model_path is None else text_model_path
+        model_type="text", use_gpu=text_use_gpu, use_small=text_use_small, force_reload=force_reload
     )
     _ = load_model(
         model_type="coarse",
         use_gpu=coarse_use_gpu,
         use_small=coarse_use_small,
         force_reload=force_reload,
-        path=path if coarse_model_path is None else coarse_model_path,
     )
     _ = load_model(
-        model_type="fine", use_gpu=fine_use_gpu, use_small=fine_use_small, force_reload=force_reload, path=path if fine_model_path is None else fine_model_path
+        model_type="fine", use_gpu=fine_use_gpu, use_small=fine_use_small, force_reload=force_reload
     )
     _ = load_codec_model(use_gpu=codec_use_gpu, force_reload=force_reload)
 
@@ -384,6 +310,7 @@ def preload_models(
 ####
 # Generation Functionality
 ####
+
 
 def _tokenize(tokenizer, text):
     return tokenizer.encode(text, add_special_tokens=False)
@@ -396,10 +323,30 @@ def _detokenize(tokenizer, enc_text):
 def _normalize_whitespace(text):
     return re.sub(r"\s+", " ", text).strip()
 
+
 TEXT_ENCODING_OFFSET = 10_048
 SEMANTIC_PAD_TOKEN = 10_000
 TEXT_PAD_TOKEN = 129_595
 SEMANTIC_INFER_TOKEN = 129_599
+
+
+def _load_history_prompt(history_prompt_input):
+    if isinstance(history_prompt_input, str) and history_prompt_input.endswith(".npz"):
+        history_prompt = np.load(history_prompt_input)
+    elif isinstance(history_prompt_input, str):
+        # make sure this works on non-ubuntu
+        history_prompt_input = os.path.join(*history_prompt_input.split("/"))
+        history_prompt = np.load(
+            os.path.join(CUR_PATH, "assets", "prompts", f"{history_prompt_input}.npz")
+        )
+    elif isinstance(history_prompt_input, dict):
+        assert("semantic_prompt" in history_prompt_input)
+        assert("coarse_prompt" in history_prompt_input)
+        assert("fine_prompt" in history_prompt_input)
+        history_prompt = history_prompt_input
+    else:
+        raise ValueError("history prompt format unrecognized")
+    return history_prompt
 
 
 def generate_text_semantic(
@@ -419,15 +366,8 @@ def generate_text_semantic(
     text = _normalize_whitespace(text)
     assert len(text.strip()) > 0
     if history_prompt is not None:
-        if history_prompt.endswith(".npz"):
-            try:
-                semantic_history = np.load(history_prompt)["semantic_prompt"]
-            except:
-                semantic_history = np.load(history_prompt)["semantic"]
-        else:
-            semantic_history = np.load(
-                os.path.join(CUR_PATH, "assets", "prompts", f"{history_prompt}.npz")
-            )["semantic_prompt"]
+        history_prompt = _load_history_prompt(history_prompt)
+        semantic_history = history_prompt["semantic_prompt"]
         assert (
             isinstance(semantic_history, np.ndarray)
             and len(semantic_history.shape) == 1
@@ -481,7 +421,7 @@ def generate_text_semantic(
         x = x.to(device)
         n_tot_steps = 768
         # custom tqdm updates since we don't know when eos will occur
-        pbar = tqdm.tqdm(disable=silent, total=100)
+        pbar = tqdm.tqdm(disable=silent, total=n_tot_steps)
         pbar_state = 0
         tot_generated_duration_s = 0
         kv_cache = None
@@ -515,33 +455,31 @@ def generate_text_semantic(
                 v, _ = torch.topk(relevant_logits, min(top_k, relevant_logits.size(-1)))
                 relevant_logits[relevant_logits < v[-1]] = -float("Inf")
             probs = F.softmax(relevant_logits / temp, dim=-1)
-            # multinomial bugged on mps: shuttle to cpu if necessary
-            inf_device = probs.device
-            if probs.device.type == "mps":
-                probs = probs.to("cpu")
-            item_next = torch.multinomial(probs, num_samples=1)
-            probs = probs.to(inf_device)
-            item_next = item_next.to(inf_device)
+            item_next = torch.multinomial(probs, num_samples=1).to(torch.int32)
             if allow_early_stop and (
                 item_next == SEMANTIC_VOCAB_SIZE
                 or (min_eos_p is not None and probs[-1] >= min_eos_p)
             ):
                 # eos found, so break
-                pbar.update(100 - pbar_state)
+                pbar.update(n - pbar_state)
                 break
             x = torch.cat((x, item_next[None]), dim=1)
             tot_generated_duration_s += 1 / SEMANTIC_RATE_HZ
             if max_gen_duration_s is not None and tot_generated_duration_s > max_gen_duration_s:
-                pbar.update(100 - pbar_state)
+                pbar.update(n - pbar_state)
                 break
             if n == n_tot_steps - 1:
-                pbar.update(100 - pbar_state)
+                pbar.update(n - pbar_state)
                 break
             del logits, relevant_logits, probs, item_next
-            req_pbar_state = np.min([100, int(round(100 * n / n_tot_steps))])
-            if req_pbar_state > pbar_state:
-                pbar.update(req_pbar_state - pbar_state)
-            pbar_state = req_pbar_state
+
+            if n > pbar_state:
+                if n > pbar.total:
+                    pbar.total = n
+                pbar.update(n - pbar_state)
+            pbar_state = n
+        pbar.total = n
+        pbar.refresh()
         pbar.close()
         out = x.detach().cpu().numpy().squeeze()[256 + 256 + 1 :]
     if OFFLOAD_CPU:
@@ -589,18 +527,9 @@ def generate_coarse(
     semantic_to_coarse_ratio = COARSE_RATE_HZ / SEMANTIC_RATE_HZ * N_COARSE_CODEBOOKS
     max_semantic_history = int(np.floor(max_coarse_history / semantic_to_coarse_ratio))
     if history_prompt is not None:
-        if history_prompt.endswith(".npz"):
-            x_history = np.load(history_prompt)
-        else:
-            x_history = np.load(
-                os.path.join(CUR_PATH, "assets", "prompts", f"{history_prompt}.npz")
-            )
-        try:
-            x_semantic_history = x_history["semantic_prompt"]
-            x_coarse_history = x_history["coarse_prompt"]
-        except:
-            x_semantic_history = x_history["semantic"]
-            x_coarse_history = x_history["coarse"]
+        history_prompt = _load_history_prompt(history_prompt)
+        x_semantic_history = history_prompt["semantic_prompt"]
+        x_coarse_history = history_prompt["coarse_prompt"]
         assert (
             isinstance(x_semantic_history, np.ndarray)
             and len(x_semantic_history.shape) == 1
@@ -714,13 +643,7 @@ def generate_coarse(
                     v, _ = torch.topk(relevant_logits, min(top_k, relevant_logits.size(-1)))
                     relevant_logits[relevant_logits < v[-1]] = -float("Inf")
                 probs = F.softmax(relevant_logits / temp, dim=-1)
-                # multinomial bugged on mps: shuttle to cpu if necessary
-                inf_device = probs.device
-                if probs.device.type == "mps":
-                    probs = probs.to("cpu")
-                item_next = torch.multinomial(probs, num_samples=1)
-                probs = probs.to(inf_device)
-                item_next = item_next.to(inf_device)
+                item_next = torch.multinomial(probs, num_samples=1).to(torch.int32)
                 item_next += logit_start_idx
                 x_coarse_in = torch.cat((x_coarse_in, item_next[None]), dim=1)
                 x_in = torch.cat((x_in, item_next[None]), dim=1)
@@ -756,15 +679,8 @@ def generate_fine(
         and x_coarse_gen.max() <= CODEBOOK_SIZE - 1
     )
     if history_prompt is not None:
-        if history_prompt.endswith(".npz"):
-            try:
-                x_fine_history = np.load(history_prompt)["fine_prompt"]
-            except:
-                x_fine_history = np.load(history_prompt)["fine"]
-        else:
-            x_fine_history = np.load(
-                os.path.join(CUR_PATH, "assets", "prompts", f"{history_prompt}.npz")
-            )["fine_prompt"]
+        history_prompt = _load_history_prompt(history_prompt)
+        x_fine_history = history_prompt["fine_prompt"]
         assert (
             isinstance(x_fine_history, np.ndarray)
             and len(x_fine_history.shape) == 2
@@ -832,16 +748,10 @@ def generate_fine(
                 else:
                     relevant_logits = logits[0, :, :CODEBOOK_SIZE] / temp
                     probs = F.softmax(relevant_logits, dim=-1)
-                    # multinomial bugged on mps: shuttle to cpu if necessary
-                    inf_device = probs.device
-                    if probs.device.type == "mps":
-                        probs = probs.to("cpu")
-                    codebook_preds = torch.hstack(
-                        [
-                            torch.multinomial(probs[nnn], num_samples=1).to(inf_device)
-                            for nnn in range(rel_start_fill_idx, 1024)
-                        ]
-                    )
+                    codebook_preds = torch.multinomial(
+                        probs[rel_start_fill_idx:1024], num_samples=1
+                    ).reshape(-1)
+                codebook_preds = codebook_preds.to(torch.int32)
                 in_buffer[0, rel_start_fill_idx:, nn] = codebook_preds
                 del logits, codebook_preds
             # transfer over info into model_in and convert to numpy

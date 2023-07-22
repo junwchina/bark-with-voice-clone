@@ -10,3 +10,6 @@ Retrieval-based-Voice-Conversion-WebUI/
 devin-youtube/
 train_rvc.ipynb
 *.pt
+suno_bark.egg-info
+.idea
+clone_voice/datasets/
