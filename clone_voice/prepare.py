@@ -1,15 +1,10 @@
 import os
-import sys
 import shutil
 import numpy
 import torchaudio
 
 from hubert.pre_kmeans_hubert import CustomHubert
 from clone_voice_config import wave_path, semantic_path, prepared_path, ready_path, hubert_model_path
-
-now_dir = os.getcwd()
-sys.path.append(now_dir)
-sys.path.append(os.path.dirname(now_dir))
 
 def prepare():
     """

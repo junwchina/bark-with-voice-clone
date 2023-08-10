@@ -7,10 +7,6 @@ from bark import text_to_semantic
 from bark.generation import load_model
 from data import load_book, random_split_chunk
 
-now_dir = os.getcwd()
-sys.path.append(now_dir)
-sys.path.append(os.path.dirname(now_dir))
-
 loaded_data = load_book(os.path.join(now_dir, "datasets/ja/ja.text8.txt"))
 
 print('Loading semantics model')

@@ -28,7 +28,7 @@ for f in os.listdir(semantic_path):
     # Don't process files that have already been processed
     if not os.path.isfile(out_file) and os.path.isfile(file_name):
         print(f'Processing {f}')
-        wav = semantic_to_waveform(numpy.load(file_name), temp=round(random.uniform(0.6, 0.8), ndigits=2), history_prompt='ja_speaker_0')
+        wav = semantic_to_waveform(numpy.load(file_name), temp=round(random.uniform(0.6, 0.8), ndigits=2))
         wavfile.write(out_file, SAMPLE_RATE, wav)
 
 print('Done!')
