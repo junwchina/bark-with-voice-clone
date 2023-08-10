@@ -5,15 +5,16 @@ import uuid
 import numpy
 from bark import text_to_semantic
 from bark.generation import load_model
+from clone_voice_config import datasets_path
 from data import load_book, random_split_chunk
 
-loaded_data = load_book(os.path.join(now_dir, "datasets/ja/ja.text8.txt"))
+loaded_data = load_book(os.path.join(datasets_path, "ja/ja.text8.txt"))
 
 print('Loading semantics model')
 load_model(use_gpu=True, use_small=False, force_reload=False, model_type='text')
 
-semantic_path = os.path.join(now_dir, 'datasets/semantic')
-semantic_dict = os.path.join(now_dir, 'datasets/semantic_dict.csv')
+semantic_path = os.path.join(datasets_path, 'semantic')
+semantic_dict = os.path.join(datasets_path, 'semantic_dict.csv')
 
 if not os.path.isdir(semantic_path):
     os.mkdir(semantic_path)
