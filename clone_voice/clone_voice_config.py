@@ -10,5 +10,5 @@ semantic_dict_path = os.path.join(datasets_path, 'semantic_dict.csv')
 prepared_path = os.path.join(datasets_path, 'prepared')
 ready_path = os.path.join(datasets_path, 'ready')
 hubert_model_path = os.path.join(now_dir, 'models/hubert_base_ls960.pt')
-tokenizer_model_name = "ja_clone_1.pth"
+tokenizer_model_name = "ja_tokenizer.pth"
 tokenizer_model_dir = os.path.join(datasets_path, 'models')

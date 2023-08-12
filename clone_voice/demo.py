@@ -1,4 +1,4 @@
-import os.path
+gitimport os.path
 
 from bark import SAMPLE_RATE, generate_audio, preload_models
 from scipy.io.wavfile import write as write_wav
@@ -11,7 +11,7 @@ preload_models()
 
 # generate audio from text
 text_prompt = """
-こんにちは、初めまして
+就職希望の会社のインターンに応募しました 憧れの会社でバリバリ働いて結果を出す男で1つで 私を育ててくれた父親に恩返しするためにも
 """
 
 voice_name = '.'.join(tokenizer_model_name.strip().split('.')[:-1])  # whatever you want the name of the voice to be

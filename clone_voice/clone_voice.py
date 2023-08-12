@@ -4,7 +4,7 @@ import os
 import torchaudio, torch, numpy as np
 from encodec.utils import convert_audio
 
-from bark.generation import _grab_best_device, load_codec_model
+from bark.generation import load_codec_model
 from hubert.pre_kmeans_hubert import CustomHubert
 from hubert.customtokenizer import CustomTokenizer
 
@@ -12,15 +12,14 @@ from clone_voice_config import hubert_model_path, tokenizer_model_name, tokenize
 
 # NotImplementedError: The operator 'aten::_weight_norm_interface' is not currently implemented for the MPS device.
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-use_gpu = True if device != 'cpu' else False
-model = load_codec_model(use_gpu=use_gpu)
+model = load_codec_model(use_gpu=torch.cuda.is_available())
 
 # Load the HuBERT model
 hubert_model = CustomHubert(checkpoint_path=hubert_model_path).to(device)
 
 # Load the CustomTokenizer model
 tokenizer_model_checkpoint = os.path.join(tokenizer_model_dir, tokenizer_model_name)
-tokenizer = CustomTokenizer.load_from_checkpoint(tokenizer_model_checkpoint).to(device)  # Automatically uses the right layers
+tokenizer = CustomTokenizer.load_from_checkpoint(tokenizer_model_checkpoint, map_location=device)  # Automatically uses the right layers
 
 # Load and pre-process the audio waveform
 audio_filepath = os.path.join(datasets_path, 'test', 'audio.wav')    # the audio you want to clone (under 13 seconds)
@@ -41,7 +40,7 @@ codes = codes.cpu().numpy()
 # move semantic tokens to cpu
 semantic_tokens = semantic_tokens.cpu().numpy()
 
-voice_name = '.'.join(tokenizer_model_name.strip().split('.')[:-1])  # whatever you want the name of the voice to be
+voice_name = 'ja_clone_1'
 output_path = 'bark/assets/prompts/' + voice_name + '.npz'
 np.savez(output_path, fine_prompt=codes, coarse_prompt=codes[:2, :], semantic_prompt=semantic_tokens)
 
